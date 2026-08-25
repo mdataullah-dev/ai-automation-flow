@@ -5,8 +5,9 @@ contacts) describe an overlapping set of people — but no single ID is shared a
 This project ingests all three, resolves the duplicates, and produces **one clean SQLite database with
 56 unique people**, one row per real person.
 
-It also documents every data-quality problem planted in the source files and exactly how each one is
-handled (Task 4).
+It also documents every data-quality problem planted in the source files and how each one is handled
+(Task 4). On top of that, a no-code Make.com + Groq automation tags each person with a skill category and
+writes it back (Task 2).
 
 **Pipeline at a glance:** `105 raw rows -> 103 staged -> 60 clusters -> 56 people`
 
@@ -16,7 +17,8 @@ handled (Task 4).
 2. [How the merge works](#how-the-merge-works)
 3. [Database schema](#database-schema)
 4. [Data issues report](#data-issues-report)
-5. [Stuck log](#stuck-log)
+5. [Skill tagging automation (Task 2)](#skill-tagging-automation-task-2)
+6. [Stuck log](#stuck-log)
 
 ---
 
@@ -95,6 +97,7 @@ One flat table, `people`, with one row per person:
 | `experience_years`, `ctc_annual`, `applied_date` | Naukri | |
 | `gig_status`, `rate_amount`, `rate_unit` | Gig workers | |
 | `verified`, `projects` | CBNexus | |
+| `skill_category` | Task 2 | LLM-assigned skill category (added by the tagger) |
 
 ---
 
@@ -166,26 +169,91 @@ the `thefuzz` dependency). Matching relies on exact identifiers plus the guarded
 
 ---
 
+## Skill tagging automation (Task 2)
+
+A no-code Make.com automation that uses an LLM to tag each person with a skill category and write it back
+to the database. **The LLM step runs inside Make, not in Python.**
+
+**Flow:** `tag_skills.py` reads untagged people from the DB → POSTs them to a Make **webhook** → Make's
+**HTTP module** calls **Groq** (`gpt-oss-120b`) to classify → Make returns the JSON → `tag_skills.py`
+writes `skill_category` back.
+
+Make is kept as a **dumb relay** — it holds the prompt and calls Groq, while Python does all the parsing
+and database writes (the reasons are in the stuck log). The scenario is exported to
+[`automation/make_scenario.blueprint.json`](automation/make_scenario.blueprint.json), importable into any
+Make account with the Groq key scrubbed.
+
+**Categories:** `automation-heavy`, `web-dev`, `data`, `ai-ml` — each person gets the group that holds the
+most of their skills.
+
+**Run it** (after the pipeline, with `GROQ_API_KEY` and `MAKE_WEBHOOK_URL` set in `.env` — see
+`.env.example`):
+
+```bash
+python automation/tag_skills.py          # tag people not yet tagged
+python automation/tag_skills.py --retag  # clear all tags and re-classify everyone
+```
+
+**Result** — 55 of 56 tagged (Arjun Mehta id 56 has no skills; CBNexus carries none):
+
+```
+web-dev  20    data  19    ai-ml  9    automation-heavy  7
+```
+
+---
+
 ## Stuck log
 
-*The hardest problems and how I got unstuck. I will expand this as I build the remaining tasks.*
+*The hardest places I got stuck, and exactly how I got out.*
 
-**1. Fuzzy name matching looked obvious and was a trap.** My first instinct for matching people with no
-shared ID was fuzzy name similarity. Before trusting it I measured it on the real names: `R. Verma` and
-`Rohit Verma` (the same person) score 77.8, while `Arjun Mehta` and `Arjun Mishra` (different people)
-score 78.3. No threshold separates them. I dropped fuzzy matching completely and matched on exact
-identifiers, using name and city only as a guarded fallback. I rejected simply lowering the threshold,
-because no threshold works on this data.
+### 1. Groq kept failing on the full batch of 55 people
 
-**2. A record count that looked right hid two bugs.** An early version returned 55 people, which looked
-about right. Checking individual records instead of the total, I found two errors pointing in opposite
-directions: three Arjun Mehtas were wrongly merged into one, and Manish Bhatia was split into two because
-his city (`'Noida '`) had a trailing space that broke the comparison. The two errors cancelled into a
-believable number. The lesson: verify specific records, not just the total count.
+- **Where I got stuck:** the Make scenario only said "Scenario failed to complete" — no detail. It
+  classified 2 test people fine, but the real run of 55 failed every single time.
+- **How I got unstuck:** I took the Groq call out of Make and ran it directly from Python to see the real
+  error — `json_validate_failed`, with an empty response. That gave me something to search.
+- **What I searched:** "groq json_validate_failed", and why a reasoning model returns empty JSON on a
+  large request.
+- **What I asked AI:** why Groq fails JSON validation only on the big batch when 2 people work fine. The
+  answer: `gpt-oss-120b` is a reasoning model, and on 55 people at once it spends its whole token budget
+  "thinking" before it writes the JSON, so nothing valid comes out.
+- **What I rejected, and why:** my first fix was to raise `max_completion_tokens` to 8000 — that hit a
+  "request too large" rate-limit wall on the free tier, so I dropped it. I used `reasoning_effort: "low"`
+  with `max_completion_tokens: 3000` instead: enough room for the answer, safely under the limit.
 
-**3. Arjun Mehta — two people or three?** This is the case I am least certain about, which is the point.
-One Arjun is solid; the two loose ends share only name and city, in a bucket already proven non-unique.
-Merging them would assume a link the data does not support, so I chose to keep them separate and flag the
-case rather than guess. A flagged 56 is more honest than a forced 55.
+### 2. Make.com JSON parser breaking on newlines & rejecting UI-heavy logic
 
-<!-- I will add more entries (what I searched, which AI suggestions I rejected and why) as I build Tasks 2, 3 and 5. -->
+- **Where I got stuck:** When sending raw JSON data to Make.com, the newlines (`\n`) in the payload
+  completely broke Make's HTTP module parser. The flow kept failing because Make couldn't handle the raw
+  JSON structure properly in the HTTP request body.
+- **What I searched:** How to correctly pass and parse JSON arrays in Make.com webhooks without breaking
+  the HTTP payload.
+- **What I asked AI:** I asked the Gemini LLM for suggestions on how to fix this JSON array parsing issue
+  natively inside Make.com.
+- **What I rejected, and why:** Gemini suggested a "Make-native" design: using built-in Iterators to loop
+  through the JSON array and parse it inside the Make UI. I completely rejected this suggestion. Doing
+  complex array manipulation inside a no-code UI is brittle, hard to debug, and over-engineers the flow.
+- **How I got unstuck (the defensive programming move):** Instead of fighting Make's UI, I took a
+  'defensive programming' approach. I pre-processed the data in Python, converting all records into a
+  single-line string (`id=1 | skills ; id=2 | skills`) to guarantee no newline breaks. I decided to treat
+  Make.com purely as a "dumb relay" and handle all the robust JSON parsing back in Python, where it's much
+  safer and errors are actually readable.
+
+### 3. The tagging ran, but the result was clearly wrong
+
+- **Where I got stuck:** the tagger happily wrote all 55 tags — but 44 of them came back
+  `automation-heavy`. 80% of people in one bucket is obviously wrong.
+- **How I got unstuck:** I queried the database and read the actual people. The model was tagging anyone
+  with a *single* automation tool (one Zapier) as automation-heavy, even people with five web-dev or data
+  skills.
+- **What I searched:** how to make an LLM classify by the *dominant* group instead of any single match,
+  and prompt patterns for balanced classification.
+- **What I asked AI:** why the model over-tagged automation, and how to word the prompt so it weighs the
+  whole skill mix.
+- **What I rejected, and why:** I rejected accepting the working-but-skewed output, and I rejected simply
+  raising the reasoning effort (that brings back the JSON crash from #1). Instead I rewrote the prompt to
+  count each person's skills per group and pick the biggest, with an explicit "one automation tool does
+  not make you automation-heavy" rule and a tie-break order. The spread balanced out: web-dev 20, data 19,
+  ai-ml 9, automation-heavy 7.
+
+<!-- I will add more entries as I build Tasks 3 and 5. -->
