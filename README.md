@@ -221,11 +221,12 @@ web-dev  20    data  19    ai-ml  9    automation-heavy  7
   "request too large" rate-limit wall on the free tier, so I dropped it. I used `reasoning_effort: "low"`
   with `max_completion_tokens: 3000` instead: enough room for the answer, safely under the limit.
 
-### 2. Make.com JSON parser breaking on newlines & rejecting UI-heavy logic
+### 2. The newline trap in Make's JSON body, and rejecting UI-heavy logic
 
-- **Where I got stuck:** When sending raw JSON data to Make.com, the newlines (`\n`) in the payload
-  completely broke Make's HTTP module parser. The flow kept failing because Make couldn't handle the raw
-  JSON structure properly in the HTTP request body.
+- **Where I got stuck:** To send many people at once I had to place them into Make's raw JSON request
+  body. Make injects mapped values into that body *without escaping them*, so a single newline (`\n`) in
+  the payload would break the JSON structure and the request would fail. The challenge was getting every
+  record through safely.
 - **What I searched:** How to correctly pass and parse JSON arrays in Make.com webhooks without breaking
   the HTTP payload.
 - **What I asked AI:** I asked the Gemini LLM for suggestions on how to fix this JSON array parsing issue
