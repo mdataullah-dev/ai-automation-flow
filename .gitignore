@@ -9,6 +9,5 @@ build/
 .mypy_cache/
 
 .env
-data/
-*.db
+db/
 *.sqlite3
