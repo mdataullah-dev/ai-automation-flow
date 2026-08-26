@@ -11,3 +11,7 @@ build/
 .env
 db/
 *.sqlite3
+
+# Task 3 — submitted audio clips are runtime artifacts (keep the folder, not the files)
+web/audio_files/*
+!web/audio_files/.gitkeep
