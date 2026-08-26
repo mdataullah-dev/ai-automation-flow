@@ -13,6 +13,28 @@ automation (Task 2) and an audio-collection app (Task 3) built on top.
 5. [Stuck log](#stuck-log)
 6. [Scaling note (Task 5)](docs/scaling.md) — one page: what breaks at 5,000 workers, and what I'd change
 
+
+---
+
+## How the pieces connect
+
+```mermaid
+flowchart LR
+    C1[Naukri CSV] --> M[pipeline/merge.py]
+    C2[Gig Workers CSV] --> M
+    C3[CBNexus CSV] --> M
+    M --> DB[(SQLite: people)]
+    DB --> TAG[automation/tag_skills.py]
+    TAG <-->|webhook| MAKE[Make.com + Groq LLM]
+    TAG --> DB
+    DB --> APP[web/app.py Streamlit]
+    APP --> AUD[(SQLite: audio_submissions)]
+```
+
+Everything reads and writes one SQLite file, `db/consultbae.sqlite3`, so the whole thing is one connected
+system — the audio app even links a new recording back to a person from Task 1 by phone number.
+
+
 ---
 
 ## Setup and run
