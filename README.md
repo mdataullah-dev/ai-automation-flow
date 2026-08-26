@@ -11,6 +11,7 @@ automation (Task 2) and an audio-collection app (Task 3) built on top.
 3. [Audio collection app (Task 3)](#audio-collection-app-task-3)
 4. [Data issues report](#data-issues-report)
 5. [Stuck log](#stuck-log)
+6. [Scaling note (Task 5)](docs/scaling.md) — one page: what breaks at 5,000 workers, and what I'd change
 
 ---
 
