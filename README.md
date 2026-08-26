@@ -1,24 +1,16 @@
-# ConsultBae — Data Merge Pipeline
+# ConsultBae — Data Merge & Automation
 
-Three CSV exports from three different systems (Naukri recruitment applicants, gig workers, and CBNexus
-contacts) describe an overlapping set of people — but no single ID is shared across all three files.
-This project ingests all three, resolves the duplicates, and produces **one clean SQLite database with
-56 unique people**, one row per real person.
-
-It also documents every data-quality problem planted in the source files and how each one is handled
-(Task 4). On top of that, a no-code Make.com + Groq automation tags each person with a skill category and
-writes it back (Task 2).
-
-**Pipeline at a glance:** `105 raw rows -> 103 staged -> 60 clusters -> 56 people`
+Three messy CSVs from three systems (recruitment applicants, gig workers, CBNexus contacts), with no
+shared ID, merged into **one clean SQLite database of 56 unique people** — plus an LLM skill-tagging
+automation (Task 2) and an audio-collection app (Task 3) built on top.
 
 ## Contents
 
 1. [Setup and run](#setup-and-run)
-2. [How the merge works](#how-the-merge-works)
-3. [Database schema](#database-schema)
+2. [Skill tagging automation (Task 2)](#skill-tagging-automation-task-2)
+3. [Audio collection app (Task 3)](#audio-collection-app-task-3)
 4. [Data issues report](#data-issues-report)
-5. [Skill tagging automation (Task 2)](#skill-tagging-automation-task-2)
-6. [Stuck log](#stuck-log)
+5. [Stuck log](#stuck-log)
 
 ---
 
@@ -27,77 +19,72 @@ writes it back (Task 2).
 Requires **Python 3.10+**.
 
 ```bash
-# 1. Clone
+# --- Setup ---
 git clone https://github.com/mdataullah-dev/ai-automation-flow.git
 cd ai-automation-flow
-
-# 2. Create and activate a virtual environment
 python -m venv .venv
-.venv\Scripts\Activate.ps1          # Windows (PowerShell)
-# source .venv/bin/activate         # macOS / Linux
-
-# 3. Install dependencies
+.venv\Scripts\Activate.ps1          # Windows (PowerShell)  ·  mac/linux: source .venv/bin/activate
 pip install -r requirements.txt
 
-# 4. Run the pipeline
+# --- Task 1: build the clean database (run this first) ---
 python pipeline/merge.py
+
+# --- Task 2: tag each person's skill category (Make + Groq) ---
+#   needs GROQ_API_KEY and MAKE_WEBHOOK_URL in .env, and the Make scenario switched ON
+python automation/tag_skills.py            # tag everyone not yet tagged
+python automation/tag_skills.py --retag    # clear all tags and re-classify everyone
+python automation/tag_skills.py --sample   # 2-person test to the webhook, no DB writes (setup/debug)
+
+# --- Task 3: audio collection app (opens in the browser) ---
+streamlit run web/app.py
 ```
 
-The pipeline reads the three CSVs from `data/`, merges them, and writes the result to
-`db/consultbae.sqlite3`. It also prints a summary of every data issue it detected.
-
-**Expected output:**
-
-```
-Ingesting and cleaning raw data...
-  staged 103 rows after structural cleanup
-Resolving entities and merging duplicates...
-  60 clusters after exact email/phone matching
-  56 people after name+city matching
-Saving clean golden records to SQLite database...
-Success! 56 unique people saved to ...\db\consultbae.sqlite3
-```
+Task 1 prints `103 staged → 60 clusters → 56 people` and writes `db/consultbae.sqlite3`. Tasks 2 and 3
+both read and write that same database, so run the pipeline first.
 
 ---
 
-## How the merge works
+## Skill tagging automation (Task 2)
 
-No column is common to all three files: source 1 has email and phone, source 2 has email only, source 3
-has phone only. People are matched in two passes.
+A no-code **Make.com** automation that uses an LLM to tag each person with a skill category. The LLM step
+runs **inside Make**, not in Python.
 
-**Pass 1 — exact identifiers.** Two records are the same person if they share an exact (normalised) email
-or phone. This links transitively: a source-1 record that has both an email and a phone connects a
-source-2 record (matched on its email) and a source-3 record (matched on its phone) into a single person.
+**Flow:** `tag_skills.py` reads untagged people → POSTs them to a Make **webhook** → Make calls **Groq**
+(`gpt-oss-120b`) to classify → returns the result → `tag_skills.py` writes `skill_category` back to the
+database.
 
-**Pass 2 — name and city, guarded.** Four people appear only in the email-only and phone-only files, so
-they share no identifier and can be linked only by name and city. This merge happens **only when the two
-records have no conflicting evidence** — one contributes an email, the other a phone. If two records share
-a name and city but carry *different* phone numbers, they are kept as different people.
+The scenario is exported to
+[`automation/make_scenario.blueprint.json`](automation/make_scenario.blueprint.json), importable into any
+Make account with the Groq key scrubbed.
 
-**Why 56 and not 55?** Three different "Arjun Mehta" records exist in Noida with conflicting phone
-numbers. Their identity cannot be inferred safely, so the pipeline does not merge them — it keeps them
-separate and flags the case for review instead of inventing a person who does not exist. The full
-explanation is in [the ambiguous case](#the-ambiguous-case-arjun-mehta) below.
+**Categories:** `automation-heavy`, `web-dev`, `data`, `ai-ml` — each person gets the group that holds the
+most of their skills. Result on the 56 people (one has no skills, since CBNexus carries none, so 55 are
+tagged):
 
-Fuzzy string matching is deliberately **not** used; [the note below](#why-not-fuzzy-matching) shows why it
-cannot work on this data.
+```
+web-dev  20    data  19    ai-ml  9    automation-heavy  7
+```
+
+Run `python automation/tag_skills.py` (or `--retag` to clear and re-classify everyone).
 
 ---
 
-## Database schema
+## Audio collection app (Task 3)
 
-One flat table, `people`, with one row per person:
+A **Streamlit** app where a gig worker submits a voice recording; the app measures the audio and stores it
+in the same database. Run with `streamlit run web/app.py`.
 
-| Column | Source | Notes |
-|--------|--------|-------|
-| `id` | — | primary key |
-| `name`, `email`, `phone`, `city` | all | golden values; `email` and `phone` are `UNIQUE` |
-| `skills` | all | de-duplicated union of every skill across the person's rows |
-| `sources` | — | which files the person appeared in |
-| `experience_years`, `ctc_annual`, `applied_date` | Naukri | |
-| `gig_status`, `rate_amount`, `rate_unit` | Gig workers | |
-| `verified`, `projects` | CBNexus | |
-| `skill_category` | Task 2 | LLM-assigned skill category (added by the tagger) |
+Two tabs:
+- **Submit** — enter name + phone, then **record in the browser** *or* **upload a file**. On submit the
+  clip is saved, its properties are extracted, and a row is written to a new `audio_submissions` table.
+- **All submissions** — every submission with a ▶ play button and its properties.
+
+**Extracted for every clip:** duration, sample rate (kHz), bitrate (kbps), loudness (dB), plus a bonus
+noise/quality estimate — all via the ffmpeg bundled by `imageio-ffmpeg` (no system install) and numpy.
+
+**Ties back to Task 1:** the phone is normalised with the merge pipeline's `clean_phone`, so a submission
+links to one of the 56 people when the phone matches. Clips are stored under `web/audio_files/`
+(git-ignored — they are runtime data).
 
 ---
 
@@ -165,40 +152,7 @@ tune correctly:
 | `Arjun Mehta` vs `Arjun Mishra` | 78.3 | **do not merge** (different people) |
 
 No threshold keeps the first and rejects the second, so fuzzy matching was removed entirely (along with
-the `thefuzz` dependency). Matching relies on exact identifiers plus the guarded name-and-city rule above.
-
----
-
-## Skill tagging automation (Task 2)
-
-A no-code Make.com automation that uses an LLM to tag each person with a skill category and write it back
-to the database. **The LLM step runs inside Make, not in Python.**
-
-**Flow:** `tag_skills.py` reads untagged people from the DB → POSTs them to a Make **webhook** → Make's
-**HTTP module** calls **Groq** (`gpt-oss-120b`) to classify → Make returns the JSON → `tag_skills.py`
-writes `skill_category` back.
-
-Make is kept as a **dumb relay** — it holds the prompt and calls Groq, while Python does all the parsing
-and database writes (the reasons are in the stuck log). The scenario is exported to
-[`automation/make_scenario.blueprint.json`](automation/make_scenario.blueprint.json), importable into any
-Make account with the Groq key scrubbed.
-
-**Categories:** `automation-heavy`, `web-dev`, `data`, `ai-ml` — each person gets the group that holds the
-most of their skills.
-
-**Run it** (after the pipeline, with `GROQ_API_KEY` and `MAKE_WEBHOOK_URL` set in `.env` — see
-`.env.example`):
-
-```bash
-python automation/tag_skills.py          # tag people not yet tagged
-python automation/tag_skills.py --retag  # clear all tags and re-classify everyone
-```
-
-**Result** — 55 of 56 tagged (Arjun Mehta id 56 has no skills; CBNexus carries none):
-
-```
-web-dev  20    data  19    ai-ml  9    automation-heavy  7
-```
+the `thefuzz` dependency). Matching relies on exact identifiers plus a guarded name-and-city rule.
 
 ---
 
@@ -221,26 +175,7 @@ web-dev  20    data  19    ai-ml  9    automation-heavy  7
   "request too large" rate-limit wall on the free tier, so I dropped it. I used `reasoning_effort: "low"`
   with `max_completion_tokens: 3000` instead: enough room for the answer, safely under the limit.
 
-### 2. The newline trap in Make's JSON body, and rejecting UI-heavy logic
-
-- **Where I got stuck:** To send many people at once I had to place them into Make's raw JSON request
-  body. Make injects mapped values into that body *without escaping them*, so a single newline (`\n`) in
-  the payload would break the JSON structure and the request would fail. The challenge was getting every
-  record through safely.
-- **What I searched:** How to correctly pass and parse JSON arrays in Make.com webhooks without breaking
-  the HTTP payload.
-- **What I asked AI:** I asked the Gemini LLM for suggestions on how to fix this JSON array parsing issue
-  natively inside Make.com.
-- **What I rejected, and why:** Gemini suggested a "Make-native" design: using built-in Iterators to loop
-  through the JSON array and parse it inside the Make UI. I completely rejected this suggestion. Doing
-  complex array manipulation inside a no-code UI is brittle, hard to debug, and over-engineers the flow.
-- **How I got unstuck (the defensive programming move):** Instead of fighting Make's UI, I took a
-  'defensive programming' approach. I pre-processed the data in Python, converting all records into a
-  single-line string (`id=1 | skills ; id=2 | skills`) to guarantee no newline breaks. I decided to treat
-  Make.com purely as a "dumb relay" and handle all the robust JSON parsing back in Python, where it's much
-  safer and errors are actually readable.
-
-### 3. The tagging ran, but the result was clearly wrong
+### 2. The tagging ran, but the result was clearly wrong
 
 - **Where I got stuck:** the tagger happily wrote all 55 tags — but 44 of them came back
   `automation-heavy`. 80% of people in one bucket is obviously wrong.
@@ -257,4 +192,18 @@ web-dev  20    data  19    ai-ml  9    automation-heavy  7
   not make you automation-heavy" rule and a tie-break order. The spread balanced out: web-dev 20, data 19,
   ai-ml 9, automation-heavy 7.
 
-<!-- I will add more entries as I build Tasks 3 and 5. -->
+### 3. Extracting audio properties with no prior audio experience
+
+- **Where I got stuck:** I had never worked with audio, and I needed duration, sample rate, bitrate, and
+  loudness from arbitrary clips (browser recordings and uploads). The library I picked, `imageio-ffmpeg`,
+  bundles ffmpeg but **not** ffprobe — so the usual "run ffprobe and read its JSON" route was unavailable.
+- **How I got unstuck:** I read the sample rate, bitrate, and codec straight out of ffmpeg's own `-i`
+  banner with a regex, then decoded the clip to raw audio samples and computed duration and loudness
+  (RMS in dBFS) from the numbers with numpy.
+- **What I searched:** how to read audio metadata using ffmpeg alone (without ffprobe), and how loudness
+  in dBFS and a noise floor are actually calculated.
+- **What I asked AI:** how to turn raw samples into a rough noise/quality score.
+- **What tripped me up, and the fix:** my first quality score labelled *every* clip "poor". I realised my
+  synthetic test tone had no silent gaps, so its "noise floor" equalled the signal itself. I re-tested
+  with speech-like audio (loud parts plus silence) and it behaved correctly — clean clips scored "good",
+  constant hiss scored "poor".
